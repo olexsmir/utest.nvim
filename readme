@@ -1,0 +1,42 @@
+μtest.nvim
+----------
+
+Small(~1K LOC) test runner for neovim.
+I used neotest for a while, it often broke on me after updates,
+so I made this mess.
+
+INSTALL
+
+  vim.pack.add({ "https://git.olexsmir.xyz/utest.nvim" })
+  require("utest").setup()
+
+USAGE
+
+  Plugin only provides lua api to interact with the plugin.
+
+  require("utest").run() -- runs nearest test to relativly to cursor
+  require("utest").run_file() -- runs all tests in the current file
+  require("utest").cancel() -- cancels running test(s)
+  require("utest").clear() -- clears diagnostics messages/signs
+  require("utest").quickfix() -- populates quickfix with test outputs
+
+CONFIGURATION
+
+  -- this is default config
+  require("utest").setup {
+    timeout = 30, -- (seconds) timeout for tests
+    icons = {
+      success = "",
+      failed = "",
+      running = "",
+    }
+  }
+
+
+LICENSE
+
+  "THE BEERWARE LICENSE" (Revision 42):
+  Oleksandr Smirnov wrote this code. As long as you retain this
+  notice, you can do whatever you want with this stuff. If we
+  meet someday, and you think this stuff is worth it, you can
+  buy me a beer in return.
