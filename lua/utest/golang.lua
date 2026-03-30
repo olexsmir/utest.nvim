@@ -1,10 +1,10 @@
 local golang = {}
 golang.ft = "go"
 golang.query = [[
-; func TestXxx(t *testing.T) and func ExampleXxx()
+; func TestXxx(t *testing.T)
 ((function_declaration
   name: (identifier) @test.name)
-  (#match? @test.name "^(Test|Example)")
+  (#match? @test.name "^Test")
   (#not-match? @test.name "^TestMain$")) @test.definition
 
 ; t.Run("subtest name", func(t *testing.T) {...})
@@ -14,9 +14,7 @@ golang.query = [[
     (#match? @_operand "^(t|s|suite)$")
     field: (field_identifier) @_method)
   (#match? @_method "^Run$")
-  arguments: (argument_list
-    .
-    (interpreted_string_literal) @test.name)) @test.definition
+  arguments: (argument_list . (interpreted_string_literal) @test.name)) @test.definition
 
 ; ============================================================================
 ; Table-driven tests with named slice variable and keyed fields
@@ -32,22 +30,18 @@ golang.query = [[
 (block
   (statement_list
     (short_var_declaration
-      left: (expression_list
-        (identifier) @test.cases)
+      left: (expression_list (identifier) @test.cases)
       right: (expression_list
         (composite_literal
           (literal_value
             (literal_element
               (literal_value
                 (keyed_element
-                  (literal_element
-                    (identifier) @test.field.name)
-                  (literal_element
-                    (interpreted_string_literal) @test.name)))) @test.definition))))
+                  (literal_element (identifier) @test.field.name)
+                  (literal_element (interpreted_string_literal) @test.name)))) @test.definition))))
     (for_statement
       (range_clause
-        left: (expression_list
-          (identifier) @test.case)
+        left: (expression_list (identifier) @test.case)
         right: (identifier) @test.cases1
         (#eq? @test.cases @test.cases1))
       body: (block
@@ -80,16 +74,13 @@ golang.query = [[
 (block
   (statement_list
     (short_var_declaration
-      left: (expression_list
-        (identifier) @test.cases)
+      left: (expression_list (identifier) @test.cases)
       right: (expression_list
         (composite_literal
           (literal_value
             (keyed_element
-              (literal_element
-                (interpreted_string_literal) @test.name)
-              (literal_element
-                (literal_value) @test.definition))))))
+              (literal_element (interpreted_string_literal) @test.name)
+              (literal_element (literal_value) @test.definition))))))
     (for_statement
       (range_clause
         left: (expression_list
@@ -111,25 +102,31 @@ golang.query = [[
                   (#eq? @test.key.name @test.key.name1))))))))))
 ]]
 
+---@param name string
+---@return boolean
+function golang.is_subtest(name)
+  return not name:match "^Test"
+end
+
 ---@param file string
 ---@return string
-function golang.get_package_dir(file)
+function golang.get_cwd(file)
   return vim.fn.fnamemodify(file, ":h")
 end
 
 ---@param file string
 ---@return string[]
-function golang.build_file_command(file)
-  local pkg_dir = golang.get_package_dir(file)
+function golang.test_file_command(file)
+  local pkg_dir = golang.get_cwd(file)
   return { "go", "test", "-vet=off", "-json", "-v", "-count=1", pkg_dir }
 end
 
 ---@param test table Test info with name, parent, is_subtest fields
 ---@param file string File path
 ---@return string[] Command arguments
-function golang.build_command(test, file)
-  local pkg_dir = golang.get_package_dir(file)
-  local run_pattern
+function golang.test_command(test, file)
+  local pkg_dir = golang.get_cwd(file)
+  local run_pattern = ""
   if test.is_subtest and test.parent then
     run_pattern = "^"
       .. vim.fn.escape(test.parent, "[](){}.*+?^$\\")
@@ -140,36 +137,23 @@ function golang.build_command(test, file)
     run_pattern = "^" .. vim.fn.escape(test.name, "[](){}.*+?^$\\") .. "$"
   end
 
-  return {
-    "go",
-    "test",
-    "-vet=off",
-    "-json",
-    "-v",
-    "-count=1",
-    "-run",
-    run_pattern,
-    pkg_dir,
-  }
+  return { "go", "test", "-vet=off", "-json", "-v", "-count=1", "-run", run_pattern, pkg_dir }
 end
 
 function golang.parse_output(output, file)
   local results = {}
-  local test_outputs = {} ---@type table<string, string[]>
-  local test_status = {} ---@type table<string, "pass"|"fail">
   local file_basename = vim.fn.fnamemodify(file, ":t")
+  local test_outputs = {} ---@type table<string, string[]>
+  local test_status = {} ---@type table<string, utest.TestStatus>
   for _, line in ipairs(output) do
-    -- Skip empty lines
     if line == "" then goto continue end
 
-    -- Parse JSON
     local ok, event = pcall(vim.json.decode, line)
     if not ok or not event then goto continue end
 
     local test_name = event.Test
     if not test_name then goto continue end
 
-    -- Handle different actions
     if event.Action == "run" then
       test_outputs[test_name] = test_outputs[test_name] or {}
     elseif event.Action == "output" then
@@ -178,8 +162,10 @@ function golang.parse_output(output, file)
         local output_line = (event.Output:gsub("\n$", ""))
         table.insert(test_outputs[test_name], output_line)
       end
-    elseif event.Action == "pass" or event.Action == "skip" then
-      test_status[test_name] = "pass"
+    elseif event.Action == "pass" then
+      test_status[test_name] = "success"
+    elseif event.Action == "skip" then
+      test_status[test_name] = "skipped"
     elseif event.Action == "fail" then
       test_status[test_name] = "fail"
     end
@@ -187,11 +173,9 @@ function golang.parse_output(output, file)
     ::continue::
   end
 
-  -- Build results from collected data
+  -- build results
   for name, status in pairs(test_status) do
     local output_lines = test_outputs[name] or {}
-
-    -- Extract error line if failed
     local error_line = nil
     if status == "fail" then
       for _, out_line in ipairs(output_lines) do
@@ -214,29 +198,28 @@ function golang.parse_output(output, file)
   return results
 end
 
---- TODO: fix me daddy
 ---@param output string[] output lines, json format
----@param test_name string|nil Specific test name to get output for
+---@param test_name string|nil specific test name to get output for
 ---@return string[]
 function golang.extract_test_output(output, test_name)
   local result = {}
   for _, line in ipairs(output) do
     local ok, event = pcall(vim.json.decode, line)
-    if ok and event and event.Action == "output" then
-      local output_test = event.Test or ""
-      if test_name then
-        -- Only include output for the exact test name (not parents)
-        if output_test == test_name then table.insert(result, event.Output) end
-      else
-        -- Include all output (for file-level runs)
-        table.insert(result, event.Output)
+    if ok and event and event.Action == "output" and event.Output then
+      local trimmed = vim.trim(event.Output)
+      if trimmed ~= "" then
+        if test_name then
+          if (event.Test or "") == test_name then table.insert(result, trimmed) end
+        else
+          table.insert(result, trimmed)
+        end
       end
     end
   end
   return result
 end
 
----@param output string[] Output lines
+---@param output string[]
 ---@return string|nil
 function golang.extract_error_message(output)
   for _, line in ipairs(output) do

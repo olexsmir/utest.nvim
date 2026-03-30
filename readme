@@ -26,9 +26,10 @@ CONFIGURATION
   require("utest").setup {
     timeout = 30, -- (seconds) timeout for tests
     icons = {
-      success = "",
       failed = "",
       running = "",
+      skipped = "",
+      success = "",
     }
   }
 

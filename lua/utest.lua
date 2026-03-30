@@ -1,14 +1,15 @@
 ---@class utest.Adapter
 ---@field ft string
 ---@field query string
----@field get_package_dir fun(file:string):string
----@field build_file_command fun(file:string):string[]
----@field build_command fun(test:table, file:string) -- FIXME: `table`
+---@field is_subtest fun(name:string):boolean
+---@field get_cwd fun(file:string):string
+---@field test_file_command fun(file:string):string[]
+---@field test_command fun(test:utest.Test, file:string)
 ---@field parse_output fun(output:string[], file:string):utest.AdapterTestResult
 ---@field extract_test_output fun(output:string[], test_name:string|nil):string[]
 ---@field extract_error_message fun(output:string[]):string|nil
 
----@alias utest.TestStatus "pass"|"fail"|"running"
+---@alias utest.TestStatus "success"|"fail"|"running"|"skipped"
 
 ---@class utest.Test
 ---@field name string
@@ -22,16 +23,40 @@
 
 ---@class utest.AdapterTestResult
 ---@field name string
----@field status "pass"|"fail"
+---@field status utest.TestStatus
 ---@field output string[]
 ---@field error_line number|nil
 
-local S = { jobs = {}, results = {} }
+---@class utest.Job
+---@field job_id number
+---@field test_id string
+---@field file string
+---@field name string
+---@field line number
+---@field start_time number
+
+---@class utest.JobResult
+---@field status utest.TestStatus
+---@field output string
+---@field raw_output? string
+---@field timestamp number
+---@field file string
+---@field error_message? string
+---@field name? string
+---@field line? number
+
+local test_failed_msg = "[Test failed]"
 local H = {
   ---@type table<string, utest.Adapter>
   adapters = {},
   ---@type table<string, vim.treesitter.Query>
   queries = {},
+
+  ---@type table<string, utest.Job>
+  jobs = {},
+
+  ---@type table<string, utest.JobResult>
+  results = {},
 
   sns = nil,
   dns = nil,
@@ -41,13 +66,17 @@ local H = {
 
 local utest = {}
 utest.config = {
-  icons = { success = "", failed = "", running = "" }, -- TODO: add skipped
   timeout = 30,
+  icons = {
+    failed = "",
+    running = "",
+    skipped = "",
+    success = "",
+  },
 }
 
 function utest.setup(opts)
   utest.config = vim.tbl_deep_extend("keep", utest.config, opts)
-
   H.sns = vim.api.nvim_create_namespace "utest_signs"
   H.dns = vim.api.nvim_create_namespace "utest_diagnostics"
   H.adapters.go = require "utest.golang"
@@ -61,9 +90,7 @@ function utest.run()
     return
   end
 
-  local cursor = vim.api.nvim_win_get_cursor(0)
-  local cursor_line = cursor[1] - 1
-
+  local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1
   local test = H.find_nearest_test(bufnr, cursor_line, adapter)
   if not test then
     vim.notify("[utest] no near test found", vim.log.levels.INFO)
@@ -94,10 +121,10 @@ end
 
 function utest.cancel()
   local cancelled = 0
-  for id, info in pairs(S.jobs) do
+  for id, info in pairs(H.jobs) do
     pcall(vim.fn.jobstop, id)
     if info.test_id then
-      S.results[info.test_id] = {
+      H.results[info.test_id] = {
         status = "fail",
         output = "",
         error_message = "Test cancelled",
@@ -109,7 +136,7 @@ function utest.cancel()
     end
     cancelled = cancelled + 1
   end
-  S.jobs = {}
+  H.jobs = {}
 
   if cancelled > 0 then
     vim.notify("[utest] cancelled running test(s)", vim.log.levels.INFO)
@@ -120,7 +147,7 @@ end
 
 function utest.clear()
   local bufnr = vim.api.nvim_get_current_buf()
-  S.clear_file(vim.api.nvim_buf_get_name(bufnr))
+  H.clear_file(vim.api.nvim_buf_get_name(bufnr))
   H.signs_clear_buffer(bufnr)
   H.diagnostics_clear_buffer(bufnr)
   H.qf_clear()
@@ -128,10 +155,10 @@ end
 
 function utest.qf()
   local qfitems = {}
-  for test_id, result in pairs(S.get_failed()) do
+  for test_id, result in pairs(H.get_failed()) do
     local file, line, name = test_id:match "^(.+):(%d+):(.+)$"
     if file and line then
-      local error_text = result.test_output or result.error_message or "[Test failed]"
+      local error_text = result.output or result.error_message or test_failed_msg
       local lines = vim.split(error_text, "\n", { plain = true })
       for i, lcontent in ipairs(lines) do
         lcontent = vim.trim(lcontent)
@@ -157,27 +184,25 @@ function utest.qf()
   vim.fn.setqflist({}, "r", { title = "utest: failed tests", items = qfitems })
 end
 
--- STATE ======================================================================
+-- HELPERS ====================================================================
 
-function S.make_test_id(file, line, name)
+function H.make_test_id(file, line, name)
   return string.format("%s:%d:%s", file, line, name)
 end
 
-function S.clear_file(file)
-  for id, _ in pairs(S.results) do
-    if id:match("^" .. vim.pesc(file) .. ":") then S.results[id] = nil end
+function H.clear_file(file)
+  for id, _ in pairs(H.results) do
+    if id:match("^" .. vim.pesc(file) .. ":") then H.results[id] = nil end
   end
 end
 
-function S.get_failed()
+function H.get_failed()
   local f = {}
-  for id, r in pairs(S.results) do
+  for id, r in pairs(H.results) do
     if r.status == "fail" then f[id] = r end
   end
   return f
 end
-
--- HELPERS ====================================================================
 
 function H.qf_clear()
   local qf = vim.fn.getqflist { title = 1 }
@@ -186,8 +211,10 @@ end
 
 -- SIGNS
 
+---@type table<utest.TestStatus, string>
 local sign_highlights = {
-  pass = "DiagnosticOk",
+  success = "DiagnosticOk",
+  skipped = "DiagnosticInfo",
   fail = "DiagnosticError",
   running = "DiagnosticInfo",
 }
@@ -197,13 +224,6 @@ local sign_highlights = {
 ---@param status utest.TestStatus
 ---@param test_id string
 function H.sign_place(bufnr, line, status, test_id)
-  local icon = utest.config.icons.success
-  if status == "fail" then
-    icon = utest.config.icons.failed
-  elseif status == "running" then
-    icon = utest.config.icons.running
-  end
-
   if not H.extmarks[bufnr] then H.extmarks[bufnr] = {} end
 
   local existing_id = H.extmarks[bufnr][test_id]
@@ -212,7 +232,10 @@ function H.sign_place(bufnr, line, status, test_id)
     H.extmarks[bufnr][test_id] = nil
   end
 
-  local hl = sign_highlights[status] -- FIXME: might fail if status is invalid
+  -- FIXME: might fail if status is invalid
+  local icon = utest.config.icons[status]
+  local hl = sign_highlights[status]
+
   local ok, res = pcall(vim.api.nvim_buf_set_extmark, bufnr, H.sns, line, 0, {
     priority = 1000,
     sign_text = icon,
@@ -227,7 +250,7 @@ end
 function H.sign_get_current_line(bufnr, test_id)
   if not H.extmarks[bufnr] or not H.extmarks[bufnr][test_id] then return nil end
   local ok, mark =
-      pcall(vim.api.nvim_buf_get_extmark_by_id, bufnr, H.sns, H.extmarks[bufnr][test_id], {})
+    pcall(vim.api.nvim_buf_get_extmark_by_id, bufnr, H.sns, H.extmarks[bufnr][test_id], {})
   if ok and mark and #mark >= 1 then return mark[1] end
   return nil
 end
@@ -259,30 +282,14 @@ end
 ---@param bufnr number
 ---@param line number 0-indexed line number
 ---@param message string|nil
----@param output string[]|nil Full output lines
-function H.diagnostics_set(bufnr, line, message, output)
+function H.diagnostics_set(bufnr, line, message)
   if not H.diagnostics[bufnr] then H.diagnostics[bufnr] = {} end
-  local msg = message or "[Test failed]"
-  if output and #output > 0 then
-    local readable_lines = {}
-    for _, out_line in ipairs(output) do
-      --  TODO: this should be in utest.golang, only support plain text
-      local trimmed = vim.trim(out_line)
-      if trimmed ~= "" then table.insert(readable_lines, trimmed) end
-    end
-
-    if #readable_lines > 0 then
-      local output_text = table.concat(readable_lines, "\n")
-      if output_text ~= "" then msg = msg .. "\n" .. output_text end
-    end
-  end
-
   H.diagnostics[bufnr][line] = {
     lnum = line,
     col = 0,
     severity = vim.diagnostic.severity.ERROR,
     source = "utest",
-    message = msg,
+    message = message or test_failed_msg,
   }
   H.diagnostics_refresh(bufnr)
 end
@@ -301,20 +308,20 @@ end
 
 -- RUNNER
 
--- TODO: refactor
----@param test unknown TODO: fix type
+---@param test utest.Test
 ---@param adapter utest.Adapter
 ---@param bufnr number
 function H.execute_test(test, adapter, bufnr)
-  local cmd = adapter.build_command(test, test.file)
-  local test_id = S.make_test_id(test.file, test.line, test.name)
+  local cmd = adapter.test_command(test, test.file)
+  local test_id = H.make_test_id(test.file, test.line, test.name)
   local output_lines = {}
   local timed_out = false
 
-  S.results[test_id] = {
+  H.results[test_id] = {
     status = "running",
     output = "",
     timestamp = os.time(),
+    file = test.file,
   }
   H.sign_place(bufnr, test.line, "running", test_id)
 
@@ -325,7 +332,7 @@ function H.execute_test(test, adapter, bufnr)
       timeout_timer:close()
       timeout_timer = nil
     end
-    if job_id and S.jobs[job_id] then S.jobs[job_id] = nil end
+    if job_id and H.jobs[job_id] then H.jobs[job_id] = nil end
   end
 
   local function on_output(_, data, _)
@@ -360,7 +367,7 @@ function H.execute_test(test, adapter, bufnr)
     if not test_result then
       test_result = {
         name = test.name,
-        status = exit_code == 0 and "pass" or "fail",
+        status = exit_code == 0 and "success" or "fail",
         output = output_lines,
         error_line = nil,
       }
@@ -368,23 +375,21 @@ function H.execute_test(test, adapter, bufnr)
 
     -- ensure status validity
     local final_status = test_result.status
-    if final_status ~= "pass" and final_status ~= "fail" then
-      final_status = exit_code == 0 and "pass" or "fail"
+    if final_status ~= "success" and final_status ~= "fail" and final_status ~= "skipped" then
+      final_status = exit_code == 0 and "success" or "fail"
     end
     test_result.status = final_status
 
-    -- get human redabble output
-    local test_output = {}
-    if adapter.extract_test_output then
-      test_output = adapter.extract_test_output(output_lines, search_name)
-    end
+    local test_output = adapter.extract_test_output(output_lines, search_name)
+    local error_message = test_result.status == "fail"
+        and adapter.extract_error_message(output_lines)
+      or nil
 
-    S.results[test_id] = {
+    H.results[test_id] = {
       status = test_result.status,
-      output = full_output,
-      test_output = table.concat(test_output, "\n"),
-      error_message = test_result.status == "fail" and adapter.extract_error_message(output_lines)
-          or nil,
+      output = table.concat(test_output, "\n"),
+      raw_output = full_output,
+      error_message = error_message,
       timestamp = os.time(),
       file = test.file,
       line = test.line,
@@ -403,8 +408,7 @@ function H.execute_test(test, adapter, bufnr)
           H.diagnostics_set(
             bufnr,
             test.line,
-            S.results[test_id].test_output or S.results[test_id].error_message or "[Test failed]",
-            test_output
+            H.results[test_id].output or H.results[test_id].error_message or test_failed_msg
           )
         end
       else
@@ -414,7 +418,7 @@ function H.execute_test(test, adapter, bufnr)
   end
 
   job_id = vim.fn.jobstart(cmd, {
-    cwd = adapter.get_package_dir(test.file),
+    cwd = adapter.get_cwd(test.file),
     on_stdout = on_output,
     on_stderr = on_output,
     on_exit = on_exit,
@@ -428,7 +432,7 @@ function H.execute_test(test, adapter, bufnr)
     return
   end
 
-  S.jobs[job_id] = {
+  H.jobs[job_id] = {
     job_id = job_id,
     test_id = test_id,
     file = test.file,
@@ -443,10 +447,10 @@ function H.execute_test(test, adapter, bufnr)
 
   -- stylua: ignore
   timeout_timer:start(timeout, 0, vim.schedule_wrap(function() ---@diagnostic disable-line: need-check-nil
-    if S.jobs[job_id] then
+    if H.jobs[job_id] then
       timed_out = true
       vim.fn.jobstop(job_id)
-      S.results[test_id] = {
+      H.results[test_id] = {
         status = "fail",
         output = table.concat(output_lines, "\n"),
         error_message = "Test timed out after " .. utest.config.timeout .. "s",
@@ -456,7 +460,7 @@ function H.execute_test(test, adapter, bufnr)
         name = test.name,
       }
       H.sign_place(bufnr, test.line, "fail", test_id)
-      H.diagnostics_set(bufnr, test.line, "Test timed out", output_lines)
+      H.diagnostics_set(bufnr, test.line, "Test timed out")
       cleanup()
     end
   end))
@@ -477,16 +481,21 @@ function H.get_query(lang, query)
   return q
 end
 
--- TODO: refactor
 ---@param bufnr number
 ---@param adapter utest.Adapter
 ---@return utest.Test[]
 function H.find_tests(bufnr, adapter)
   local query = H.get_query(adapter.ft, adapter.query)
-  if not query then return {} end -- TODO: show error
+  if not query then
+    vim.notify("[utest] failed to run " .. adapter.ft .. " adapter query", vim.log.levels.ERROR)
+    return {}
+  end
 
   local pok, parser = pcall(vim.treesitter.get_parser, bufnr, adapter.ft)
-  if not pok or not parser then return {} end -- TODO: show error
+  if not pok or not parser then
+    vim.notify("[utest] failed to get treesitter parser", vim.log.levels.ERROR)
+    return {}
+  end
 
   local tree = parser:parse()[1]
   if not tree then return {} end
@@ -514,9 +523,7 @@ function H.find_tests(bufnr, adapter)
     end
 
     if test_name and test_def then
-      -- TODO: it's knows about go too much
       local start_row, start_col, end_row, end_col = test_def:range()
-      local is_subtest = not test_name:match "^Test" and not test_name:match "^Example"
       table.insert(tests, {
         name = test_name,
         file = file,
@@ -524,7 +531,7 @@ function H.find_tests(bufnr, adapter)
         col = start_col,
         end_line = end_row,
         end_col = end_col,
-        is_subtest = is_subtest,
+        is_subtest = adapter.is_subtest(test_name),
         parent = nil,
       })
     end
@@ -558,7 +565,7 @@ function H.find_tests(bufnr, adapter)
 
       if innermost_parent then
         -- Build full parent path for nested subtests
-        if innermost_parent.parent then
+        if innermost_parent.parent then -- TODO: too go dependent
           test.parent = innermost_parent.parent .. "/" .. innermost_parent.name
         else
           test.parent = innermost_parent.name
