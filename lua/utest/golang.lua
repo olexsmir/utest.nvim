@@ -267,7 +267,7 @@ function golang.test_file_command(file)
   return { "go", "test", "-vet=off", "-json", "-v", "-count=1", pkg_dir }
 end
 
----@param test table Test info with name, parent, is_subtest fields
+---@param test utest.Test Test info with name, parent, is_subtest fields
 ---@param file string File path
 ---@return string[] Command arguments
 function golang.test_command(test, file)
