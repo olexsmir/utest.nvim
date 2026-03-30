@@ -1,3 +1,4 @@
 - batch tests on .run_file()
-- tests
 - ocaml adapter
+- mini.test adapter
+- tests
