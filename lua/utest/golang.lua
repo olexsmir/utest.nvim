@@ -1,13 +1,15 @@
 local golang = {}
 golang.ft = "go"
+
+-- source: https://github.com/fredrikaverpil/neotest-golang/blob/main/lua/neotest-golang/queries/go
 golang.query = [[
-; func TestXxx(t *testing.T)
+; func TestXxx(t *testing.T) / func ExampleXxx()
 ((function_declaration
   name: (identifier) @test.name)
-  (#match? @test.name "^Test")
+  (#match? @test.name "^(Test|Example)")
   (#not-match? @test.name "^TestMain$")) @test.definition
 
-; t.Run("subtest name", func(t *testing.T) {...})
+; t.Run("subtest", func(t *testing.T) {...})
 (call_expression
   function: (selector_expression
     operand: (identifier) @_operand
@@ -16,32 +18,28 @@ golang.query = [[
   (#match? @_method "^Run$")
   arguments: (argument_list . (interpreted_string_literal) @test.name)) @test.definition
 
-; ============================================================================
-; Table-driven tests with named slice variable and keyed fields
-; Detects table tests with struct fields using keys (e.g., {name: "test1"}).
-; Pattern:
-;   tt := []struct{ name string }{
-;     {name: "test1"},  // @test.name = "test1"
-;     {name: "test2"},  // @test.name = "test2"
-;   }
-;   for _, tc := range tt {
-;     t.Run(tc.name, func(t *testing.T) { ... })
-;   }
+; Table tests: named variable, keyed fields
+;   tt := []struct{ name string }{ {name: "test1"} }
+;   for _, tc := range tt { t.Run(tc.name, ...) }
 (block
   (statement_list
     (short_var_declaration
-      left: (expression_list (identifier) @test.cases)
+      left: (expression_list
+        (identifier) @test.cases)
       right: (expression_list
         (composite_literal
           (literal_value
             (literal_element
               (literal_value
                 (keyed_element
-                  (literal_element (identifier) @test.field.name)
-                  (literal_element (interpreted_string_literal) @test.name)))) @test.definition))))
+                  (literal_element
+                    (identifier) @test.field.name)
+                  (literal_element
+                    (interpreted_string_literal) @test.name)))) @test.definition))))
     (for_statement
       (range_clause
-        left: (expression_list (identifier) @test.case)
+        left: (expression_list
+          (identifier) @test.case)
         right: (identifier) @test.cases1
         (#eq? @test.cases @test.cases1))
       body: (block
@@ -60,27 +58,175 @@ golang.query = [[
                   field: (field_identifier) @test.field.name1
                   (#eq? @test.field.name @test.field.name1))))))))))
 
-; ============================================================================
-; Map-based table-driven tests
-; Detects table tests where test cases are defined in a map with string keys.
-; Pattern:
-;   testCases := map[string]struct{ want int }{
-;     "test1": {want: 1},  // @test.name = "test1"
-;     "test2": {want: 2},  // @test.name = "test2"
-;   }
-;   for name, tc := range testCases {
-;     t.Run(name, func(t *testing.T) { ... })
-;   }
+; Table tests: named variable, unkeyed (positional) fields
+;   tt := []struct{ name string }{ {"test1"} }
+;   for _, tc := range tt { t.Run(tc.name, ...) }
 (block
   (statement_list
     (short_var_declaration
-      left: (expression_list (identifier) @test.cases)
+      left: (expression_list
+        (identifier) @test.cases)
+      right: (expression_list
+        (composite_literal
+          body: (literal_value
+            (literal_element
+              (literal_value
+                .
+                (literal_element
+                  (interpreted_string_literal) @test.name)
+                (literal_element)) @test.definition)))))
+    (for_statement
+      (range_clause
+        left: (expression_list
+          (identifier) @test.key.name
+          (identifier) @test.case)
+        right: (identifier) @test.cases1
+        (#eq? @test.cases @test.cases1))
+      body: (block
+        (statement_list
+          (expression_statement
+            (call_expression
+              function: (selector_expression
+                operand: (identifier) @test.operand
+                (#match? @test.operand "^[t]$")
+                field: (field_identifier) @test.method
+                (#match? @test.method "^Run$"))
+              arguments: (argument_list
+                (selector_expression
+                  operand: (identifier) @test.case1
+                  (#eq? @test.case @test.case1))))))))))
+
+; Inline table tests: keyed fields
+;   for _, tc := range []struct{ name string }{ {name: "test1"} } {
+;     t.Run(tc.name, ...)
+;   }
+(for_statement
+  (range_clause
+    left: (expression_list
+      (identifier)
+      (identifier) @test.case)
+    right: (composite_literal
+      type: (slice_type
+        element: (struct_type
+          (field_declaration_list
+            (field_declaration
+              name: (field_identifier)
+              type: (type_identifier)))))
+      body: (literal_value
+        (literal_element
+          (literal_value
+            (keyed_element
+              (literal_element
+                (identifier)) @test.field.name
+              (literal_element
+                (interpreted_string_literal) @test.name))) @test.definition))))
+  body: (block
+    (statement_list
+      (expression_statement
+        (call_expression
+          function: (selector_expression
+            operand: (identifier)
+            field: (field_identifier))
+          arguments: (argument_list
+            (selector_expression
+              operand: (identifier)
+              field: (field_identifier) @test.field.name1)
+            (#eq? @test.field.name @test.field.name1)))))))
+
+; Inline table tests: unkeyed (positional) fields
+;   for _, tc := range []struct{ name string }{ {"test1"} } {
+;     t.Run(tc.name, ...)
+;   }
+(for_statement
+  (range_clause
+    left: (expression_list
+      (identifier)
+      (identifier) @test.case)
+    right: (composite_literal
+      type: (slice_type
+        element: (struct_type
+          (field_declaration_list
+            (field_declaration
+              name: (field_identifier) @test.field.name
+              type: (type_identifier) @field.type
+              (#eq? @field.type "string")))))
+      body: (literal_value
+        (literal_element
+          (literal_value
+            .
+            (literal_element
+              (interpreted_string_literal) @test.name)
+            (literal_element)) @test.definition))))
+  body: (block
+    (statement_list
+      (expression_statement
+        (call_expression
+          function: (selector_expression
+            operand: (identifier) @test.operand
+            (#match? @test.operand "^[t]$")
+            field: (field_identifier) @test.method
+            (#match? @test.method "^Run$"))
+          arguments: (argument_list
+            (selector_expression
+              operand: (identifier) @test.case1
+              (#eq? @test.case @test.case1)
+              field: (field_identifier) @test.field.name1
+              (#eq? @test.field.name @test.field.name1))))))))
+
+; Inline pointer slice table tests: keyed fields
+;   for _, tc := range []*Type{ {Name: "test1"} } {
+;     t.Run(tc.Name, ...)
+;   }
+(for_statement
+  (range_clause
+    left: (expression_list
+      (identifier)
+      (identifier) @test.case)
+    right: (composite_literal
+      type: (slice_type
+        element: (pointer_type))
+      body: (literal_value
+        (literal_element
+          (literal_value
+            (keyed_element
+              (literal_element
+                (identifier) @test.field.name)
+              (literal_element
+                (interpreted_string_literal) @test.name))) @test.definition))))
+  body: (block
+    (statement_list
+      (expression_statement
+        (call_expression
+          function: (selector_expression
+            operand: (identifier) @test.operand
+            (#match? @test.operand "^[t]$")
+            field: (field_identifier) @test.method
+            (#match? @test.method "^Run$"))
+          arguments: (argument_list
+            (selector_expression
+              operand: (identifier) @test.case1
+              (#eq? @test.case @test.case1)
+              field: (field_identifier) @test.field.name1
+              (#eq? @test.field.name @test.field.name1))))))))
+
+; Map-based table tests
+;   testCases := map[string]struct{ want int }{
+;     "test1": {want: 1},
+;   }
+;   for name, tc := range testCases { t.Run(name, ...) }
+(block
+  (statement_list
+    (short_var_declaration
+      left: (expression_list
+        (identifier) @test.cases)
       right: (expression_list
         (composite_literal
           (literal_value
             (keyed_element
-              (literal_element (interpreted_string_literal) @test.name)
-              (literal_element (literal_value) @test.definition))))))
+              (literal_element
+                (interpreted_string_literal) @test.name)
+              (literal_element
+                (literal_value) @test.definition))))))
     (for_statement
       (range_clause
         left: (expression_list
@@ -105,7 +251,7 @@ golang.query = [[
 ---@param name string
 ---@return boolean
 function golang.is_subtest(name)
-  return not name:match "^Test"
+  return not name:match "^Test" and not name:match "^Example"
 end
 
 ---@param file string

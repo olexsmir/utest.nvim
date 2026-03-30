@@ -504,7 +504,6 @@ function H.find_tests(bufnr, adapter)
   local root = tree:root()
   local tests = {}
 
-  -- TODO: this is probably overly complicated
   for _, match, _ in query:iter_matches(root, bufnr, 0, -1) do
     local test_name, test_def = nil, nil
     for id, nodes in pairs(match) do
@@ -536,6 +535,24 @@ function H.find_tests(bufnr, adapter)
       })
     end
   end
+
+  -- Deduplicate: when multiple query patterns match overlapping AST regions
+  -- (e.g. function_declaration + table test entry), keep the narrower match
+  table.sort(tests, function(a, b)
+    if a.line ~= b.line then return a.line < b.line end
+    return (a.end_line - a.line) < (b.end_line - b.line)
+  end)
+
+  local seen = {}
+  local deduped = {}
+  for _, test in ipairs(tests) do
+    local key = test.line .. ":" .. test.name
+    if not seen[key] then
+      seen[key] = true
+      table.insert(deduped, test)
+    end
+  end
+  tests = deduped
 
   -- Resolve parent relationships for subtests (including nested subtests)
   -- Uses line ranges to determine proper parent hierarchy
