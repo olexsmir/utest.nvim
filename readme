@@ -18,7 +18,7 @@ USAGE
   require("utest").run_file() -- runs all tests in the current file
   require("utest").cancel() -- cancels running test(s)
   require("utest").clear() -- clears diagnostics messages/signs
-  require("utest").quickfix() -- populates quickfix with test outputs
+  require("utest").qf() -- populates quickfix with test outputs
 
 CONFIGURATION
 
