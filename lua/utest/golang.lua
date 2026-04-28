@@ -250,15 +250,11 @@ golang.query = [[
 
 ---@param name string
 ---@return boolean
-function golang.is_subtest(name)
-  return not name:match "^Test" and not name:match "^Example"
-end
+function golang.is_subtest(name) return not name:match "^Test" and not name:match "^Example" end
 
 ---@param file string
 ---@return string
-function golang.get_cwd(file)
-  return vim.fn.fnamemodify(file, ":h")
-end
+function golang.get_cwd(file) return vim.fn.fnamemodify(file, ":h") end
 
 ---@param file string
 ---@return string[]

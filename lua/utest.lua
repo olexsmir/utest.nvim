@@ -186,9 +186,7 @@ end
 
 -- HELPERS ====================================================================
 
-function H.make_test_id(file, line, name)
-  return string.format("%s:%d:%s", file, line, name)
-end
+function H.make_test_id(file, line, name) return string.format("%s:%d:%s", file, line, name) end
 
 function H.clear_file(file)
   for id, _ in pairs(H.results) do
@@ -556,9 +554,7 @@ function H.find_tests(bufnr, adapter)
 
   -- Resolve parent relationships for subtests (including nested subtests)
   -- Uses line ranges to determine proper parent hierarchy
-  table.sort(tests, function(a, b)
-    return a.line < b.line
-  end)
+  table.sort(tests, function(a, b) return a.line < b.line end)
 
   -- Build parent hierarchy by checking which tests contain others based on line ranges
   -- Treesitter uses half-open intervals [start, end), so we use <= for start and < for end
