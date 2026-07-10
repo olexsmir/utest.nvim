@@ -2,7 +2,5 @@
 - ocaml adapter
 - mini.test adapter
 - look into jobwait()
-- on .cancel() tests are shown as failed
-- go: if package cant be compiled, tests are shown as failed
 - tests
 - .next_test() and .prev_test() for navigation ???

@@ -347,7 +347,17 @@ function golang.extract_test_output(output, test_name)
   local result = {}
   for _, line in ipairs(output) do
     local ok, event = pcall(vim.json.decode, line)
-    if ok and event and event.Action == "output" and event.Output then
+    if not ok or not event then goto continue end
+
+    -- Capture build-output events (compilation errors)
+    if event.Action == "build-output" and event.Output then
+      local trimmed = vim.trim(event.Output)
+      if trimmed ~= "" then table.insert(result, trimmed) end
+      goto continue
+    end
+
+    -- Capture output events
+    if event.Action == "output" and event.Output then
       local trimmed = vim.trim(event.Output)
       if trimmed ~= "" then
         if test_name then
@@ -357,6 +367,8 @@ function golang.extract_test_output(output, test_name)
         end
       end
     end
+
+    ::continue::
   end
   return result
 end

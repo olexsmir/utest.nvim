@@ -158,7 +158,9 @@ function utest.qf()
   for test_id, result in pairs(H.get_failed()) do
     local file, line, name = test_id:match "^(.+):(%d+):(.+)$"
     if file and line then
-      local error_text = result.output or result.error_message or test_failed_msg
+      local error_text = (result.output ~= nil and result.output ~= "" and result.output)
+        or result.error_message
+        or test_failed_msg
       local lines = vim.split(error_text, "\n", { plain = true })
       for i, lcontent in ipairs(lines) do
         lcontent = vim.trim(lcontent)
@@ -406,7 +408,13 @@ function H.execute_test(test, adapter, bufnr)
           H.diagnostics_set(
             bufnr,
             test.line,
-            H.results[test_id].output or H.results[test_id].error_message or test_failed_msg
+            (
+              H.results[test_id].output ~= nil
+                and H.results[test_id].output ~= ""
+                and H.results[test_id].output
+              or H.results[test_id].error_message
+              or test_failed_msg
+            )
           )
         end
       else
