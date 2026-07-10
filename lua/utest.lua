@@ -97,7 +97,7 @@ function utest.run()
     return
   end
 
-  H.execute_test(test, adapter, bufnr)
+  H.run_tests({ test }, adapter, bufnr)
 end
 
 function utest.run_file()
@@ -114,16 +114,27 @@ function utest.run_file()
     return
   end
 
-  for _, test in ipairs(tests) do
-    H.execute_test(test, adapter, bufnr)
-  end
+  H.run_tests(tests, adapter, bufnr)
 end
 
 function utest.cancel()
   local cancelled = 0
   for id, info in pairs(H.jobs) do
     pcall(vim.fn.jobstop, id)
-    if info.test_id then
+    if info.test_ids then
+      for _, test_id in ipairs(info.test_ids) do
+        local file, line, name = test_id:match "^(.+):(%d+):(.+)$"
+        H.results[test_id] = {
+          status = "fail",
+          output = "",
+          error_message = "Test cancelled",
+          timestamp = os.time(),
+          file = file,
+          line = line and tonumber(line) or nil,
+          name = name,
+        }
+      end
+    elseif info.test_id then
       H.results[info.test_id] = {
         status = "fail",
         output = "",
@@ -308,39 +319,37 @@ end
 
 -- RUNNER
 
----@param test utest.Test
+---@param tests utest.Test[]
 ---@param adapter utest.Adapter
 ---@param bufnr number
-function H.execute_test(test, adapter, bufnr)
-  local cmd = adapter.test_command(test, test.file)
-  local test_id = H.make_test_id(test.file, test.line, test.name)
+function H.run_tests(tests, adapter, bufnr)
+  local is_single = #tests == 1
+  local test = tests[1]
+  local file = test.file
+  local cmd = is_single and adapter.test_command(test, file) or adapter.test_file_command(file)
+  local cwd = adapter.get_cwd(file)
   local output_lines = {}
   local timed_out = false
 
-  H.results[test_id] = {
-    status = "running",
-    output = "",
-    timestamp = os.time(),
-    file = test.file,
-  }
-  H.sign_place(bufnr, test.line, "running", test_id)
+  -- Build test lookup table and mark all as running
+  local test_map = {}
+  local tid_list = {}
+  for _, t in ipairs(tests) do
+    local tid = H.make_test_id(t.file, t.line, t.name)
+    test_map[tid] = t
+    tid_list[#tid_list + 1] = tid
+    H.results[tid] = { status = "running", output = "", timestamp = os.time(), file = t.file }
+    H.sign_place(bufnr, t.line, "running", tid)
+  end
 
-  local timeout_timer, job_id = nil, nil
+  local job_id, timeout_timer
+
   local function cleanup()
     if timeout_timer then
       timeout_timer:stop()
       timeout_timer:close()
-      timeout_timer = nil
     end
     if job_id and H.jobs[job_id] then H.jobs[job_id] = nil end
-  end
-
-  local function on_output(_, data, _)
-    if data then
-      for _, line in ipairs(data) do
-        if line ~= "" then table.insert(output_lines, line) end
-      end
-    end
   end
 
   local function on_exit(_, exit_code)
@@ -348,128 +357,117 @@ function H.execute_test(test, adapter, bufnr)
     cleanup()
 
     local full_output = table.concat(output_lines, "\n")
-    local results = adapter.parse_output(output_lines, test.file)
+    local parsed = adapter.parse_output(output_lines, file)
 
-    -- find result for ths specific test
-    local test_result = nil
-    local search_name = test.name
-    if test.is_subtest and test.parent then
-      search_name = test.parent .. "/" .. test.name:gsub(" ", "_")
+    -- Build name → result map for fast lookup
+    local result_map = {}
+    for _, r in ipairs(parsed) do
+      result_map[r.name] = r
     end
-    for _, r in ipairs(results) do
-      if r.name == search_name or r.name == test.name then
-        test_result = r
-        break
+
+    for tid, t in pairs(test_map) do
+      local search_name = t.name
+      if t.is_subtest and t.parent then search_name = t.parent .. "/" .. t.name:gsub(" ", "_") end
+      local tr = result_map[search_name] or result_map[t.name]
+
+      local status
+      if tr then
+        status = tr.status
+      else
+        status = exit_code == 0 and "success" or "fail"
       end
-    end
+      if status ~= "success" and status ~= "fail" and status ~= "skipped" then
+        status = exit_code == 0 and "success" or "fail"
+      end
 
-    -- fallback: use exit code if no specific result found
-    if not test_result then
-      test_result = {
-        name = test.name,
-        status = exit_code == 0 and "success" or "fail",
-        output = output_lines,
-        error_line = nil,
+      local test_output = adapter.extract_test_output(output_lines, search_name)
+      H.results[tid] = {
+        status = status,
+        output = table.concat(test_output, "\n"),
+        raw_output = full_output,
+        error_message = status == "fail" and adapter.extract_error_message(output_lines) or nil,
+        timestamp = os.time(),
+        file = t.file,
+        line = t.line,
+        name = t.name,
       }
     end
 
-    -- ensure status validity
-    local final_status = test_result.status
-    if final_status ~= "success" and final_status ~= "fail" and final_status ~= "skipped" then
-      final_status = exit_code == 0 and "success" or "fail"
-    end
-    test_result.status = final_status
-
-    local test_output = adapter.extract_test_output(output_lines, search_name)
-    local error_message = test_result.status == "fail"
-        and adapter.extract_error_message(output_lines)
-      or nil
-
-    H.results[test_id] = {
-      status = test_result.status,
-      output = table.concat(test_output, "\n"),
-      raw_output = full_output,
-      error_message = error_message,
-      timestamp = os.time(),
-      file = test.file,
-      line = test.line,
-      name = test.name,
-    }
-
-    -- update ui
     vim.schedule(function()
       if not vim.api.nvim_buf_is_valid(bufnr) then return end
-      H.sign_place(bufnr, test.line, test_result.status, test_id)
-      if test_result.status == "fail" then
-        -- Only set diagnostic if there's no diagnostic already at this line
-        -- This prevents multiple diagnostics when parent/child tests both fail
-        local existing = vim.diagnostic.get(bufnr, { namespace = H.dns, lnum = test.line })
-        if #existing == 0 then
-          H.diagnostics_set(
-            bufnr,
-            test.line,
-            (
-              H.results[test_id].output ~= nil
-                and H.results[test_id].output ~= ""
-                and H.results[test_id].output
-              or H.results[test_id].error_message
-              or test_failed_msg
+      for tid, t in pairs(test_map) do
+        local r = H.results[tid]
+        local s = r.status
+        H.sign_place(bufnr, t.line, s, tid)
+        if s == "fail" then
+          local d = vim.diagnostic.get(bufnr, { namespace = H.dns, lnum = t.line })
+          if #d == 0 then
+            H.diagnostics_set(
+              bufnr,
+              t.line,
+              r.output ~= nil and r.output ~= "" and r.output or r.error_message or test_failed_msg
             )
-          )
+          end
+        else
+          H.diagnostics_clear(bufnr, t.line)
         end
-      else
-        H.diagnostics_clear(bufnr, test.line)
       end
     end)
   end
 
   job_id = vim.fn.jobstart(cmd, {
-    cwd = adapter.get_cwd(test.file),
-    on_stdout = on_output,
-    on_stderr = on_output,
+    cwd = cwd,
+    on_stdout = function(_, data, _)
+      if data then
+        for _, l in ipairs(data) do
+          if l ~= "" then table.insert(output_lines, l) end
+        end
+      end
+    end,
+    on_stderr = function(_, data, _)
+      if data then
+        for _, l in ipairs(data) do
+          if l ~= "" then table.insert(output_lines, l) end
+        end
+      end
+    end,
     on_exit = on_exit,
     stdout_buffered = true,
     stderr_buffered = true,
   })
 
   if job_id < 0 then
-    vim.notify("[utest] failed to start test: " .. test.name, vim.log.levels.ERROR)
-    cleanup()
+    vim.notify("[utest] failed to start tests", vim.log.levels.ERROR)
     return
   end
 
   H.jobs[job_id] = {
     job_id = job_id,
-    test_id = test_id,
-    file = test.file,
-    line = test.line,
-    name = test.name,
+    test_ids = tid_list,
+    file = file,
     start_time = os.time(),
     output = output_lines,
   }
 
-  local timeout = utest.config.timeout * 1000
   timeout_timer = vim.uv.new_timer()
 
   -- stylua: ignore
-  timeout_timer:start(timeout, 0, vim.schedule_wrap(function() ---@diagnostic disable-line: need-check-nil
-    if H.jobs[job_id] then
-      timed_out = true
-      vim.fn.jobstop(job_id)
-      H.results[test_id] = {
+  timeout_timer:start(utest.config.timeout * 1000, 0, vim.schedule_wrap(function() ---@diagnostic disable-line: need-check-nil
+    if not H.jobs[job_id] then return end
+    timed_out = true
+    vim.fn.jobstop(job_id)
+    for tid, t in pairs(test_map) do
+      H.results[tid] = {
         status = "fail",
         output = table.concat(output_lines, "\n"),
         error_message = "Test timed out after " .. utest.config.timeout .. "s",
-        timestamp = os.time(),
-        file = test.file,
-        line = test.line,
-        name = test.name,
+        timestamp = os.time(), file = t.file, line = t.line, name = t.name,
       }
-      H.sign_place(bufnr, test.line, "fail", test_id)
-      H.diagnostics_set(bufnr, test.line, "Test timed out")
-      cleanup()
+      H.sign_place(bufnr, t.line, "fail", tid)
+      H.diagnostics_set(bufnr, t.line, "Test timed out")
     end
-  end))
+    H.jobs[job_id] = nil
+  end))  -- stylua: ignore
 end
 
 -- TREESITTER PARSER
