@@ -1,5 +1,4 @@
 - ocaml adapter
 - mini.test adapter
 - look into jobwait()
-- tests
 - .next_test() and .prev_test() for navigation ???

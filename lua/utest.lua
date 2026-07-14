@@ -80,6 +80,7 @@ function utest.setup(opts)
   H.sns = vim.api.nvim_create_namespace "utest_signs"
   H.dns = vim.api.nvim_create_namespace "utest_diagnostics"
   H.adapters.go = require "utest.golang"
+  H.adapters.odin = require "utest.odin"
 end
 
 function utest.run()

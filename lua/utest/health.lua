@@ -22,6 +22,10 @@ function health.check()
   vim.health.start "Go adapter"
   check_treesitter "go"
   check_binary "go"
+
+  vim.health.start "Odin adapter"
+  check_treesitter "odin"
+  check_binary "odin"
 end
 
 return health
